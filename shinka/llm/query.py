@@ -1,5 +1,6 @@
 from typing import List, Union, Optional, Dict
 import random
+import os
 from pydantic import BaseModel
 from .client import get_client_llm
 from .models.pricing import (
@@ -208,6 +209,8 @@ def query(
         query_fn = query_gemini
     elif "/" in model_name and not model_name.startswith("bedrock/"):
         query_fn = query_openrouter
+    elif os.getenv("API_BASE"):
+        query_fn = query_openai
     else:
         raise ValueError(f"Model {model_name} not supported.")
     result = query_fn(

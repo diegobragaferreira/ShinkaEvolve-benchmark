@@ -1,4 +1,5 @@
 import os
+import httpx
 import openai
 import google.generativeai as genai
 import pandas as pd
@@ -102,6 +103,13 @@ def get_client_model(model_name: str) -> tuple[Union[openai.OpenAI, str], str]:
             },
         )
 
+        model_to_use = model_name
+    elif os.getenv("API_BASE"):
+        client = openai.OpenAI(
+            base_url=os.getenv("API_BASE"),
+            api_key=os.getenv("API_KEY", "sk-placeholder"),
+            http_client=httpx.Client(verify=False),
+        )
         model_to_use = model_name
     else:
         raise ValueError(f"Invalid embedding model: {model_name}")

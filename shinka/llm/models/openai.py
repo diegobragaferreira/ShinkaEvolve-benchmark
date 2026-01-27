@@ -70,8 +70,13 @@ def query_openai(
             new_content += i[0] + ":" + i[1] + "\n"
         new_msg_history.append({"role": "assistant", "content": new_content})
 
-    input_cost = OPENAI_MODELS[model]["input_price"] * response.usage.input_tokens
-    output_cost = OPENAI_MODELS[model]["output_price"] * response.usage.output_tokens
+    if model in OPENAI_MODELS:
+        input_cost = OPENAI_MODELS[model]["input_price"] * response.usage.input_tokens
+        output_cost = OPENAI_MODELS[model]["output_price"] * response.usage.output_tokens
+    else:
+        #logger.warning(f"Model {model} not found in pricing. Defaulting cost to 0.")
+        input_cost = 0.0
+        output_cost = 0.0
     result = QueryResult(
         content=content,
         msg=msg,

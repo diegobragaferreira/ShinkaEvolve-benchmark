@@ -1,5 +1,6 @@
 from typing import Any, Tuple
 import os
+import httpx
 import anthropic
 import openai
 import instructor
@@ -98,6 +99,14 @@ def get_client_llm(model_name: str, structured_output: bool = False) -> Tuple[An
         )
         if structured_output:
             client = instructor.from_openai(client, mode=instructor.Mode.JSON)
+    elif os.getenv("API_BASE"):
+        client = openai.OpenAI(
+            base_url=os.getenv("API_BASE"),
+            api_key=os.getenv("API_KEY", "sk-placeholder"),
+            http_client=httpx.Client(verify=False),
+        )
+        if structured_output:
+            client = instructor.from_openai(client, mode=instructor.Mode.TOOLS_STRICT)
     else:
         raise ValueError(f"Model {model_name} not supported.")
 
