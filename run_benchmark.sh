@@ -42,21 +42,20 @@ TASKS=(
     
         echo "Launching task: $task"
         
-        # We set a fixed output directory for each task to allow resuming.
-        # If the directory exists, ShinkaEvolve will automatically resume the run.
-        OUTPUT_DIR="results/${task}"
-        
-        # We use 'hydra.run.dir' to override the default timestamp-based directory.
-        # We also pass 'evolution=$task' and 'task=$task' as before.
-        python shinka/launch_hydra.py \
-            task@_global_=$task \
-            evolution@_global_=$task \
-            hydra.run.dir=$OUTPUT_DIR &
-        
-        # Add the new PID to the list
-        PIDS+=($!)
-        
-        echo "------------------------------------------------"
+            # We set a fixed output directory for each task to allow resuming.
+            # If the directory exists, ShinkaEvolve will automatically resume the run.
+            OUTPUT_DIR="results/${task}"
+            
+            # We override 'output_dir' directly. 'hydra.run.dir' is defined as '${output_dir}' in config.yaml,
+            # so it will automatically update to match.
+            python shinka/launch_hydra.py \
+                task@_global_=$task \
+                evolution@_global_=$task \
+                output_dir=$OUTPUT_DIR &
+            
+            # Add the new PID to the list
+            PIDS+=($!)
+                echo "------------------------------------------------"
     done
     
     # Wait for all remaining jobs to finish
