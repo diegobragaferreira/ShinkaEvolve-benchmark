@@ -56,6 +56,60 @@ def get_latest_run_dir(exp_dir):
     run_dirs.sort(key=lambda x: os.path.basename(x))
     return run_dirs[-1]
 
+def process_and_print_run(run_path, display_name):
+    """Helper to process a single run directory and print its status line."""
+    db_path = os.path.join(run_path, "evolution_db.sqlite")
+    if not os.path.exists(db_path):
+        db_path = os.path.join(run_path, "evolution.db")
+    
+    if not os.path.exists(db_path):
+        print(f"{display_name:<45} | {'N/A':<16} | {'-':<4} | {'-':<12} | {'-':<25} | No DB")
+        return
+
+    run_name = os.path.basename(run_path)
+    # If run_path is the variant dir itself, the name might be 'qwen' or 'gemini'
+    # We might want to use the parent dir's name if we need a date, 
+    # but the script often puts runs in timestamped folders.
+    
+    try:
+        df = load_programs_to_df(db_path)
+        if df is None or df.empty:
+            print(f"{display_name:<45} | {run_name[:16]:<16} | {'0':<4} | {'-':<12} | {'-':<25} | Empty")
+            return
+        
+        if 'correct' in df.columns:
+            correct_df = df[df['correct'] == True]
+        else:
+            correct_df = df
+
+        total_gens = df['generation'].max() if 'generation' in df.columns else 0
+        
+        if correct_df.empty:
+            print(f"{display_name:<45} | {run_name[:16]:<16} | {total_gens:<4} | {'-':<12} | {'-':<25} | No valid")
+            return
+
+        # Best score
+        best_idx = correct_df['combined_score'].idxmax()
+        best_row = correct_df.loc[best_idx]
+        best_score = best_row['combined_score']
+        
+        # Identify metric
+        metric_name = "combined_score"
+        priority_metrics = ['benchmark_ratio', 'avg_benchmark_ratio', 'sum_radii', 'radii_sum', 'inv_c1', 'inv_outer_hex_side_length']
+        for m in priority_metrics:
+            if m in best_row and pd.notnull(best_row[m]):
+                try:
+                    if abs(float(best_row[m]) - float(best_score)) < 1e-6:
+                        metric_name = m
+                        break
+                except:
+                    pass
+        
+        print(f"{display_name:<45} | {run_name[:16]:<16} | {total_gens:<4} | {best_score:<12.6f} | {metric_name:<25} | OK")
+
+    except Exception as e:
+        print(f"{display_name:<45} | {run_name[:16]:<16} | {'-':<4} | {'Error':<12} | {str(e)[:25]} | Error")
+
 def generate_report():
     if load_programs_to_df is None:
         print("Error: Could not import 'shinka.utils.load_df'. Make sure the environment is active and shinka is installed.")
@@ -65,70 +119,40 @@ def generate_report():
         print(f"Results directory '{RESULTS_DIR}' not found.")
         return
 
-    experiments = [d for d in glob.glob(os.path.join(RESULTS_DIR, "*")) if os.path.isdir(d)]
-    experiments.sort()
+    task_dirs = [d for d in glob.glob(os.path.join(RESULTS_DIR, "*")) if os.path.isdir(d)]
+    task_dirs.sort()
 
-    print(f"{'Task Name':<35} | {'Run Date':<16} | {'Gen':<4} | {'Best Score':<12} | {'Metric':<25} | {'Status'}")
-    print("-" * 120)
+    print(f"{'Task Name (Variant)':<45} | {'Run Dir':<16} | {'Gen':<4} | {'Best Score':<12} | {'Metric':<25} | {'Status'}")
+    print("-" * 135)
 
-    for exp_path in experiments:
-        exp_name = os.path.basename(exp_path)
+    for task_path in task_dirs:
+        task_name = os.path.basename(task_path)
         
-        if exp_name.startswith("__") or exp_name.startswith("."):
+        if task_name.startswith("__") or task_name.startswith("."):
             continue
 
-        latest_run = get_latest_run_dir(exp_path)
-        if not latest_run:
-            print(f"{exp_name:<35} | {'N/A':<16} | {'-':<4} | {'-':<12} | {'-':<25} | No runs")
-            continue
-
-        run_name = os.path.basename(latest_run)
-        db_path = os.path.join(latest_run, "evolution.db")
-        if not os.path.exists(db_path):
-            db_path = os.path.join(latest_run, "evolution_db.sqlite")
+        # Check for sub-variants (qwen/gemini)
+        variants = [d for d in glob.glob(os.path.join(task_path, "*")) if os.path.isdir(d)]
+        variants.sort()
         
-        if not os.path.exists(db_path):
-            print(f"{exp_name:<35} | {run_name[:16]:<16} | {'-':<4} | {'-':<12} | {'-':<25} | No DB")
-            continue
+        has_named_variants = False
+        for var_path in variants:
+            var_name = os.path.basename(var_path)
+            if var_name in ["qwen", "gemini"]:
+                has_named_variants = True
+                latest_run = get_latest_run_dir(var_path)
+                if latest_run:
+                    process_and_print_run(latest_run, f"{task_name} ({var_name})")
+                else:
+                    print(f"{task_name + ' (' + var_name + ')':<45} | {'N/A':<16} | {'-':<4} | {'-':<12} | {'-':<25} | No runs")
 
-        try:
-            df = load_programs_to_df(db_path)
-            if df is None or df.empty:
-                print(f"{exp_name:<35} | {run_name[:16]:<16} | {'0':<4} | {'-':<12} | {'-':<25} | Empty")
-                continue
-            
-            if 'correct' in df.columns:
-                correct_df = df[df['correct'] == True]
+        if not has_named_variants:
+            # Fallback for old structure or non-variant tasks
+            latest_run = get_latest_run_dir(task_path)
+            if latest_run:
+                process_and_print_run(latest_run, task_name)
             else:
-                correct_df = df
-
-            total_gens = df['generation'].max() if 'generation' in df.columns else 0
-            
-            if correct_df.empty:
-                print(f"{exp_name:<35} | {run_name[:16]:<16} | {total_gens:<4} | {'-':<12} | {'-':<25} | No valid")
-                continue
-
-            # Best score
-            best_idx = correct_df['combined_score'].idxmax()
-            best_row = correct_df.loc[best_idx]
-            best_score = best_row['combined_score']
-            
-            # Identify metric
-            metric_name = "combined_score"
-            priority_metrics = ['benchmark_ratio', 'avg_benchmark_ratio', 'sum_radii', 'radii_sum', 'inv_c1', 'inv_outer_hex_side_length']
-            for m in priority_metrics:
-                if m in best_row and pd.notnull(best_row[m]):
-                    try:
-                        if abs(float(best_row[m]) - float(best_score)) < 1e-6:
-                            metric_name = m
-                            break
-                    except:
-                        pass
-            
-            print(f"{exp_name:<35} | {run_name[:16]:<16} | {total_gens:<4} | {best_score:<12.6f} | {metric_name:<25} | OK")
-
-        except Exception as e:
-            print(f"{exp_name:<35} | {run_name[:16]:<16} | {'-':<4} | {'Error':<12} | {str(e)[:25]} | Error")
+                print(f"{task_name:<45} | {'N/A':<16} | {'-':<4} | {'-':<12} | {'-':<25} | No runs")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
