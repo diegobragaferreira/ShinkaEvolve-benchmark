@@ -79,6 +79,9 @@ run_experiment() {
     echo "Launching task: $task ($variant) on cores $core_range (Slots $assigned_start_slot to $((assigned_start_slot + required_slots - 1)))"
 
     local OUTPUT_DIR="results/${task}/${variant}"
+    # Ensure directory exists for the log file
+    mkdir -p "$OUTPUT_DIR"
+    local LOG_FILE="$OUTPUT_DIR/run.log"
 
     # Launch with taskset
     # Note: Hydra/Slurm config 'cpus' parameter is passed implicitly via config file, 
@@ -88,7 +91,7 @@ run_experiment() {
         evolution@_global_=$evolution_config \
         database@_global_=$task \
         output_dir=$OUTPUT_DIR \
-        variant_suffix="_${variant}" &
+        variant_suffix="_${variant}" > "$LOG_FILE" 2>&1 &
 
     local job_pid=$!
     
