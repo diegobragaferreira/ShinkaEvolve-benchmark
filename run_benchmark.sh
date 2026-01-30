@@ -1,5 +1,7 @@
 #!/bin/bash
 
+export PYTHONPATH=$PYTHONPATH:.
+
 # List of all tasks (matching config filenames)
 TASKS=(
     "circle_packing_rect_21"
