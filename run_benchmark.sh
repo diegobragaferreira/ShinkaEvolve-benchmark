@@ -2,6 +2,14 @@
 
 export PYTHONPATH=$PYTHONPATH:.
 
+# Load API keys and environment variables
+if [ -f "export_api_keys.sh" ]; then
+    echo "Loading environment variables from export_api_keys.sh..."
+    source export_api_keys.sh
+else
+    echo "Warning: export_api_keys.sh not found. Assuming environment is already set."
+fi
+
 # List of all tasks (matching config filenames)
 TASKS=(
     "circle_packing_rect_21"
@@ -104,15 +112,24 @@ run_experiment() {
     done
 }
 
+echo "=== Phase 1: Running all Qwen experiments ==="
 for task in "${TASKS[@]}"; do
-    # Run Qwen experiment
     run_experiment "$task" "qwen" "${task}_qwen"
-    
-    # Run Gemini experiment
+done
+
+# Wait for all Qwen experiments to finish before starting Gemini
+echo "Waiting for Phase 1 to complete..."
+wait
+
+echo "=== Phase 2: Running all Gemini experiments ==="
+for task in "${TASKS[@]}"; do
+    # Reset PIDs array for the new phase (optional, but cleaner if we want to be strict,
+    # though 'wait' ensures all previous PIDs are dead, so logic handles it as free slots)
+    # The run_experiment logic checks kill -0, so it will see them as free.
     run_experiment "$task" "gemini" "${task}_gemini"
 done
 
-# Wait for all remaining jobs
+# Wait for all Gemini jobs
 wait
 
-echo "All tasks finished."
+echo "All benchmark experiments finished."
