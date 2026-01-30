@@ -2,26 +2,20 @@
 
 # List of all tasks
 TASKS=(
-    "rect_circle_packing"
-    "first_autocorr_ineq"
-    "second_autocorr_ineq"
-    "third_autocorr_ineq"
-    "heilbronn_convex_13"
-    "heilbronn_convex_14"
-    "heilbronn_triangle"
-    "kissing_number"
-    "minimizing_max_min_dist_2"
-    "minimizing_max_min_dist_3"
     "circle_packing_square_26"
     "circle_packing_square_32"
-    "circle_packing_square_general"
+    "circle_packing_rect"
     "hexagon_packing_11"
     "hexagon_packing_12"
+    "minimizing_max_min_dist_16_2"
+    "minimizing_max_min_dist_14_3"
+    "first_autocorr_ineq"
+    "second_autocorr_ineq"
 )
 
 # Configuration for CPU affinity
 TOTAL_CORES=48
-CORES_PER_JOB=8
+CORES_PER_JOB=10
 MAX_JOBS=$((TOTAL_CORES / CORES_PER_JOB))
 
 # Array to store PIDs of running jobs. Index corresponds to the core slot.
@@ -65,6 +59,7 @@ for task in "${TASKS[@]}"; do
     taskset -c "$core_range" python shinka/launch_hydra.py \
         task@_global_=$task \
         evolution@_global_=$task \
+        database@_global_=$task \
         output_dir=$OUTPUT_DIR &
 
     # Save the new PID to the slot
