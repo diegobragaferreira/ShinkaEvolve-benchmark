@@ -15,11 +15,11 @@ TASKS=(
     "circle_packing_rect_21"
     "circle_packing_square_26"
     "circle_packing_square_32"
-    "first_autocorr_ineq"
     "hexagon_packing_11"
     "hexagon_packing_12"
     "minimizing_max_min_dist_14_3"
     "minimizing_max_min_dist_16_2"
+    "first_autocorr_ineq"
     "second_autocorr_ineq"
 )
 

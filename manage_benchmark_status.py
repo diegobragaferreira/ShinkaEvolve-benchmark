@@ -63,7 +63,7 @@ def process_and_print_run(run_path, display_name):
         db_path = os.path.join(run_path, "evolution.db")
     
     if not os.path.exists(db_path):
-        print(f"{display_name:<45} | {'N/A':<16} | {'-':<4} | {'-':<12} | {'-':<25} | No DB")
+        print(f"{display_name:<37} | {'N/A':<10} | {'-':<4} | {'-':<12} | {'-':<25} | {'-':<17} | No DB")
         return
 
     run_name = os.path.basename(run_path)
@@ -74,7 +74,7 @@ def process_and_print_run(run_path, display_name):
     try:
         df = load_programs_to_df(db_path)
         if df is None or df.empty:
-            print(f"{display_name:<45} | {run_name[:16]:<16} | {'0':<4} | {'-':<12} | {'-':<25} | Empty")
+            print(f"{display_name:<37} | {run_name[:10]:<10} | {'0':<4} | {'-':<12} | {'-':<25} | {'-':<17} | Empty")
             return
         
         if 'correct' in df.columns:
@@ -82,10 +82,10 @@ def process_and_print_run(run_path, display_name):
         else:
             correct_df = df
 
-        total_gens = df['generation'].max() if 'generation' in df.columns else 0
+        total_gens = (df['generation'].max() + 1) if 'generation' in df.columns else 0
         
         if correct_df.empty:
-            print(f"{display_name:<45} | {run_name[:16]:<16} | {total_gens:<4} | {'-':<12} | {'-':<25} | No valid")
+            print(f"{display_name:<37} | {run_name[:10]:<10} | {total_gens:<4} | {'-':<12} | {'-':<25} | {'-':<17} | No valid")
             return
 
         # Best score
@@ -95,7 +95,7 @@ def process_and_print_run(run_path, display_name):
         
         # Identify metric
         metric_name = "combined_score"
-        priority_metrics = ['benchmark_ratio', 'avg_benchmark_ratio', 'sum_radii', 'radii_sum', 'inv_c1', 'inv_outer_hex_side_length']
+        priority_metrics = ['benchmark_ratio', 'avg_benchmark_ratio', 'sum_radii', 'radii_sum', 'inv_c1', 'inv_c3', 'inv_outer_hex_side_length', 'c2']
         for m in priority_metrics:
             if m in best_row and pd.notnull(best_row[m]):
                 try:
@@ -105,10 +105,29 @@ def process_and_print_run(run_path, display_name):
                 except:
                     pass
         
-        print(f"{display_name:<45} | {run_name[:16]:<16} | {total_gens:<4} | {best_score:<12.6f} | {metric_name:<25} | OK")
+        # Special handling to display constants
+        derived_val_str = "-"
+        if "first_autocorr" in display_name:
+            val = 1.0 / best_score if abs(best_score) > 1e-9 else 0
+            derived_val_str = f"c1={val:.6f} ↓"
+        elif "second_autocorr" in display_name:
+            derived_val_str = f"c2={best_score:.6f} ↑"
+        elif "third_autocorr" in display_name:
+            val = 1.0 / best_score if abs(best_score) > 1e-9 else 0
+            derived_val_str = f"c3={val:.6f} ↓"
+        elif "hexagon_packing" in display_name:
+            val = 1.0 / best_score if abs(best_score) > 1e-9 else 0
+            derived_val_str = f"s={val:.6f} ↓"
+        elif "minimizing_max_min_dist" in display_name:
+            val = 1.0 / best_score if abs(best_score) > 1e-9 else 0
+            derived_val_str = f"r={val:.6f} ↓"
+        elif "circle_packing" in display_name:
+            derived_val_str = f"sum={best_score:.6f} ↑"
+        
+        print(f"{display_name:<37} | {run_name[:10]:<10} | {total_gens:<4} | {best_score:<12.6f} | {metric_name:<25} | {derived_val_str:<17} | OK")
 
     except Exception as e:
-        print(f"{display_name:<45} | {run_name[:16]:<16} | {'-':<4} | {'Error':<12} | {str(e)[:25]} | Error")
+        print(f"{display_name:<37} | {run_name[:10]:<10} | {'-':<4} | {'Error':<12} | {str(e)[:25]:<25} | {'-':<17} | Error")
 
 def generate_report():
     if load_programs_to_df is None:
@@ -122,8 +141,8 @@ def generate_report():
     task_dirs = [d for d in glob.glob(os.path.join(RESULTS_DIR, "*")) if os.path.isdir(d)]
     task_dirs.sort()
 
-    print(f"{'Task Name (Variant)':<45} | {'Run Dir':<16} | {'Gen':<4} | {'Best Score':<12} | {'Metric':<25} | {'Status'}")
-    print("-" * 135)
+    print(f"{'Task Name (Variant)':<37} | {'Run Dir':<10} | {'Gen':<4} | {'Best Score':<12} | {'Metric':<25} | {'Const':<17} | {'Status'}")
+    print("-" * 141)
 
     for task_path in task_dirs:
         task_name = os.path.basename(task_path)
@@ -144,7 +163,7 @@ def generate_report():
                 if latest_run:
                     process_and_print_run(latest_run, f"{task_name} ({var_name})")
                 else:
-                    print(f"{task_name + ' (' + var_name + ')':<45} | {'N/A':<16} | {'-':<4} | {'-':<12} | {'-':<25} | No runs")
+                    print(f"{task_name + ' (' + var_name + ')':<37} | {'N/A':<10} | {'-':<4} | {'-':<12} | {'-':<25} | {'-':<17} | No runs")
 
         if not has_named_variants:
             # Fallback for old structure or non-variant tasks
@@ -152,7 +171,7 @@ def generate_report():
             if latest_run:
                 process_and_print_run(latest_run, task_name)
             else:
-                print(f"{task_name:<45} | {'N/A':<16} | {'-':<4} | {'-':<12} | {'-':<25} | No runs")
+                print(f"{task_name:<37} | {'N/A':<10} | {'-':<4} | {'-':<12} | {'-':<25} | {'-':<17} | No runs")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
