@@ -32,7 +32,7 @@ def aggregate_metrics(results: List[Any]) -> Dict[str, Any]:
     min_distance = np.min(pairwise_distances)
     max_distance = np.max(pairwise_distances)
 
-    min_max_ratio = min_distance / max_distance if max_distance > 0 else 0
+    min_max_ratio = (min_distance / max_distance) ** 2 if max_distance > 0 else 0
     
     return {
         "combined_score": float(min_max_ratio),
