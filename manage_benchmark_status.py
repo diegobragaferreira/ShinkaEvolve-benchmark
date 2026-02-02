@@ -4,6 +4,7 @@ import os
 import glob
 import pandas as pd
 from pathlib import Path
+from datetime import datetime
 
 # Ensure shinka is in python path to allow importing utils
 sys.path.append(os.getcwd())
@@ -56,6 +57,91 @@ def get_latest_run_dir(exp_dir):
     run_dirs.sort(key=lambda x: os.path.basename(x))
     return run_dirs[-1]
 
+def parse_log_stats(run_dir):
+    """Parses launch_hydra.log for duration and API errors."""
+    log_path = os.path.join(run_dir, "launch_hydra.log")
+    if not os.path.exists(log_path):
+        return "-", "No Log"
+
+    try:
+        with open(log_path, 'r', errors='ignore') as f:
+            lines = f.readlines()
+        
+        if not lines:
+            return "-", "Empty Log"
+
+        # Parse Time with Gap Detection
+        valid_times = []
+        
+        # Helper to extract time from line [YYYY-MM-DD HH:MM:SS,mmm]
+        def extract_time(line):
+            try:
+                # Assuming format [YYYY-MM-DD HH:MM:SS,mmm]
+                part = line.split(']')[0]
+                part = part.strip('[')
+                return datetime.strptime(part, "%Y-%m-%d %H:%M:%S,%f")
+            except:
+                return None
+
+        for line in lines:
+            t = extract_time(line)
+            if t:
+                valid_times.append(t)
+        
+        total_seconds = 0
+        if len(valid_times) > 1:
+            GAP_THRESHOLD = 1800 # 30 minutes
+            for i in range(1, len(valid_times)):
+                diff = (valid_times[i] - valid_times[i-1]).total_seconds()
+                if diff < GAP_THRESHOLD:
+                    total_seconds += diff
+        
+        duration_str = "-"
+        if total_seconds > 0:
+            hours = int(total_seconds // 3600)
+            minutes = int((total_seconds % 3600) // 60)
+            if hours > 0:
+                duration_str = f"{hours}h {minutes}m"
+            else:
+                duration_str = f"{minutes}m"
+
+        # Check for API Errors
+        api_status = "OK"
+        error_keywords = {
+            "RateLimit": "Rate",
+            "429": "Rate",
+            "Timeout": "Time",
+            "ConnectError": "Conn",
+            "500": "500",
+            "APIError": "API",
+            "ServiceUnavailable": "Serv"
+        }
+        
+        content = "".join(lines)
+        error_counts = {}
+        
+        for key, label in error_keywords.items():
+            count = content.count(key)
+            if count > 0:
+                # Aggregate counts for same label (e.g. RateLimit and 429)
+                error_counts[label] = error_counts.get(label, 0) + count
+        
+        if error_counts:
+            # Sort by count desc
+            sorted_errors = sorted(error_counts.items(), key=lambda x: x[1], reverse=True)
+            parts = []
+            for label, count in sorted_errors:
+                parts.append(f"{label}:{count}")
+            
+            api_status = ",".join(parts)
+            if len(api_status) > 18:
+                 api_status = api_status[:17] + "+"
+
+        return duration_str, api_status
+
+    except Exception:
+        return "-", "Log Err"
+
 def process_and_print_run(run_path, display_name):
     """Helper to process a single run directory and print its status line."""
     db_path = os.path.join(run_path, "evolution_db.sqlite")
@@ -63,18 +149,18 @@ def process_and_print_run(run_path, display_name):
         db_path = os.path.join(run_path, "evolution.db")
     
     if not os.path.exists(db_path):
-        print(f"{display_name:<37} | {'N/A':<10} | {'-':<4} | {'-':<12} | {'-':<25} | {'-':<17} | No DB")
+        print(f"{display_name:<37} | {'N/A':<10} | {'-':<4} | {'-':<12} | {'-':<17} | {'-':<8} | {'-':<10} | No DB")
         return
 
     run_name = os.path.basename(run_path)
-    # If run_path is the variant dir itself, the name might be 'qwen' or 'gemini'
-    # We might want to use the parent dir's name if we need a date, 
-    # but the script often puts runs in timestamped folders.
     
+    # Get Log Stats
+    duration, api_status = parse_log_stats(run_path)
+
     try:
         df = load_programs_to_df(db_path)
         if df is None or df.empty:
-            print(f"{display_name:<37} | {run_name[:10]:<10} | {'0':<4} | {'-':<12} | {'-':<25} | {'-':<17} | Empty")
+            print(f"{display_name:<37} | {run_name[:10]:<10} | {'0':<4} | {'-':<12} | {'-':<17} | {duration:<8} | {api_status:<10} | Empty")
             return
         
         if 'correct' in df.columns:
@@ -85,25 +171,13 @@ def process_and_print_run(run_path, display_name):
         total_gens = (df['generation'].max() + 1) if 'generation' in df.columns else 0
         
         if correct_df.empty:
-            print(f"{display_name:<37} | {run_name[:10]:<10} | {total_gens:<4} | {'-':<12} | {'-':<25} | {'-':<17} | No valid")
+            print(f"{display_name:<37} | {run_name[:10]:<10} | {total_gens:<4} | {'-':<12} | {'-':<17} | {duration:<8} | {api_status:<10} | No valid")
             return
 
         # Best score
         best_idx = correct_df['combined_score'].idxmax()
         best_row = correct_df.loc[best_idx]
         best_score = best_row['combined_score']
-        
-        # Identify metric
-        metric_name = "combined_score"
-        priority_metrics = ['benchmark_ratio', 'avg_benchmark_ratio', 'sum_radii', 'radii_sum', 'inv_c1', 'inv_c3', 'inv_outer_hex_side_length', 'c2']
-        for m in priority_metrics:
-            if m in best_row and pd.notnull(best_row[m]):
-                try:
-                    if abs(float(best_row[m]) - float(best_score)) < 1e-6:
-                        metric_name = m
-                        break
-                except:
-                    pass
         
         # Special handling to display constants
         derived_val_str = "-"
@@ -124,10 +198,10 @@ def process_and_print_run(run_path, display_name):
         elif "circle_packing" in display_name:
             derived_val_str = f"sum={best_score:.6f} ↑"
         
-        print(f"{display_name:<37} | {run_name[:10]:<10} | {total_gens:<4} | {best_score:<12.6f} | {metric_name:<25} | {derived_val_str:<17} | OK")
+        print(f"{display_name:<37} | {run_name[:10]:<10} | {total_gens:<4} | {best_score:<12.6f} | {derived_val_str:<17} | {duration:<8} | {api_status:<18} | OK")
 
     except Exception as e:
-        print(f"{display_name:<37} | {run_name[:10]:<10} | {'-':<4} | {'Error':<12} | {str(e)[:25]:<25} | {'-':<17} | Error")
+        print(f"{display_name:<37} | {run_name[:10]:<10} | {'-':<4} | {'Error':<12} | {'-':<17} | {duration:<8} | {api_status:<18} | Error")
 
 def generate_report():
     if load_programs_to_df is None:
@@ -141,8 +215,8 @@ def generate_report():
     task_dirs = [d for d in glob.glob(os.path.join(RESULTS_DIR, "*")) if os.path.isdir(d)]
     task_dirs.sort()
 
-    print(f"{'Task Name (Variant)':<37} | {'Run Dir':<10} | {'Gen':<4} | {'Best Score':<12} | {'Metric':<25} | {'Const':<17} | {'Status'}")
-    print("-" * 141)
+    print(f"{'Task Name (Variant)':<37} | {'Run Dir':<10} | {'Gen':<4} | {'Best Score':<12} | {'Const':<17} | {'Time':<8} | {'API':<18} | {'Status'}")
+    print("-" * 148)
 
     for task_path in task_dirs:
         task_name = os.path.basename(task_path)
@@ -163,7 +237,7 @@ def generate_report():
                 if latest_run:
                     process_and_print_run(latest_run, f"{task_name} ({var_name})")
                 else:
-                    print(f"{task_name + ' (' + var_name + ')':<37} | {'N/A':<10} | {'-':<4} | {'-':<12} | {'-':<25} | {'-':<17} | No runs")
+                    print(f"{task_name + ' (' + var_name + ')':<37} | {'N/A':<10} | {'-':<4} | {'-':<12} | {'-':<17} | {'-':<8} | {'-':<18} | No runs")
 
         if not has_named_variants:
             # Fallback for old structure or non-variant tasks
@@ -171,7 +245,8 @@ def generate_report():
             if latest_run:
                 process_and_print_run(latest_run, task_name)
             else:
-                print(f"{task_name:<37} | {'N/A':<10} | {'-':<4} | {'-':<12} | {'-':<25} | {'-':<17} | No runs")
+                print(f"{task_name:<37} | {'N/A':<10} | {'-':<4} | {'-':<12} | {'-':<17} | {'-':<8} | {'-':<18} | No runs")
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
