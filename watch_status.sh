@@ -4,4 +4,4 @@
 # to provide a live-updating dashboard of your experiments.
 # Refresh interval: 120 seconds (2 minutes)
 
-watch --interval 120 --color python manage_benchmark_status.py report
+watch --interval 120 --color python manage_benchmark_status.py report "$@"

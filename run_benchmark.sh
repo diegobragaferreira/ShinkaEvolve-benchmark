@@ -23,6 +23,9 @@ TASKS=(
     "second_autocorr_ineq"
 )
 
+EXP_NAME=${1:-"default_exp"}
+ROUND=${2:-"1"}
+
 # Configuration for CPU affinity
 TOTAL_CORES=48
 SLOT_SIZE=10
@@ -34,7 +37,7 @@ for ((i=0; i<NUM_SLOTS; i++)); do
     SLOT_PIDS[$i]=0
 done
 
-echo "Starting benchmark pipeline with NUM_SLOTS=$NUM_SLOTS (Cores per slot: $SLOT_SIZE)..."
+echo "Starting benchmark pipeline for experiment '$EXP_NAME' round '$ROUND' with NUM_SLOTS=$NUM_SLOTS (Cores per slot: $SLOT_SIZE)..."
 
 get_required_slots() {
     if [[ "$1" == "minimizing_max_min_dist_14_3" ]]; then
@@ -88,7 +91,7 @@ run_experiment() {
 
     echo "Launching task: $task ($variant) on cores $core_range (Slots $assigned_start_slot to $((assigned_start_slot + required_slots - 1)))"
 
-    local OUTPUT_DIR="results/${task}/${variant}"
+    local OUTPUT_DIR="results/${EXP_NAME}/${variant}/${ROUND}/${task}"
     # Ensure directory exists for the log file
     mkdir -p "$OUTPUT_DIR"
     local LOG_FILE="$OUTPUT_DIR/run.log"
@@ -112,24 +115,16 @@ run_experiment() {
     done
 }
 
-echo "=== Phase 1: Running all Qwen experiments ==="
-for task in "${TASKS[@]}"; do
-    run_experiment "$task" "qwen" "${task}_qwen"
+echo "=== Launching all experiments (Qwen and Gemini) ==="
+for variant in "qwen" "gemini"; do
+    echo "--- Queueing $variant experiments ---"
+    for task in "${TASKS[@]}"; do
+        run_experiment "$task" "$variant" "${task}_${variant}"
+    done
 done
 
-# Wait for all Qwen experiments to finish before starting Gemini
-echo "Waiting for Phase 1 to complete..."
-wait
-
-echo "=== Phase 2: Running all Gemini experiments ==="
-for task in "${TASKS[@]}"; do
-    # Reset PIDs array for the new phase (optional, but cleaner if we want to be strict,
-    # though 'wait' ensures all previous PIDs are dead, so logic handles it as free slots)
-    # The run_experiment logic checks kill -0, so it will see them as free.
-    run_experiment "$task" "gemini" "${task}_gemini"
-done
-
-# Wait for all Gemini jobs
+# Wait for all background jobs to finish
+echo "All experiments queued. Waiting for completion..."
 wait
 
 echo "All benchmark experiments finished."

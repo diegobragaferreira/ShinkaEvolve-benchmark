@@ -203,54 +203,145 @@ def process_and_print_run(run_path, display_name):
     except Exception as e:
         print(f"{display_name:<37} | {run_name[:10]:<10} | {'-':<4} | {'Error':<12} | {'-':<17} | {duration:<8} | {api_status:<18} | Error")
 
-def generate_report():
+def generate_report(exp_name=None, round_num=None):
     if load_programs_to_df is None:
         print("Error: Could not import 'shinka.utils.load_df'. Make sure the environment is active and shinka is installed.")
         return
 
-    if not os.path.exists(RESULTS_DIR):
-        print(f"Results directory '{RESULTS_DIR}' not found.")
+    base_results_dir = RESULTS_DIR
+    if exp_name:
+        base_results_dir = os.path.join(RESULTS_DIR, exp_name)
+
+    if not os.path.exists(base_results_dir):
+        print(f"Results directory '{base_results_dir}' not found.")
         return
 
-    task_dirs = [d for d in glob.glob(os.path.join(RESULTS_DIR, "*")) if os.path.isdir(d)]
-    task_dirs.sort()
+    # Find all database files recursively
+    results = []
+    for root, dirs, files in os.walk(base_results_dir):
+        if "evolution.db" in files or "evolution_db.sqlite" in files:
+            results.append(root)
 
-    print(f"{'Task Name (Variant)':<37} | {'Run Dir':<10} | {'Gen':<4} | {'Best Score':<12} | {'Const':<17} | {'Time':<8} | {'API':<18} | {'Status'}")
-    print("-" * 148)
+    if not results:
+        print(f"No results found in {base_results_dir}")
+        return
 
-    for task_path in task_dirs:
-        task_name = os.path.basename(task_path)
+    # Try to extract info from path
+    # Supported structures:
+    # 1. results/task/variant/run
+    # 2. results/exp/task/variant/round
+    # 3. results/exp/variant/round/task
+    
+    parsed_results = []
+    for r in results:
+        rel_path = os.path.relpath(r, RESULTS_DIR)
+        parts = rel_path.split(os.sep)
         
-        if task_name.startswith("__") or task_name.startswith("."):
+        # Default values
+        res_exp = "Root"
+        res_task = "Unknown"
+        res_variant = "default"
+        res_round = "1"
+        
+        if len(parts) >= 4:
+            # Check for results/exp/variant/round/task
+            if parts[1] in ["qwen", "gemini"]:
+                res_exp = parts[0]
+                res_variant = parts[1]
+                res_round = parts[2]
+                res_task = parts[3]
+            # Check for results/exp/task/variant/round
+            elif parts[2] in ["qwen", "gemini"]:
+                res_exp = parts[0]
+                res_task = parts[1]
+                res_variant = parts[2]
+                res_round = parts[3]
+        elif len(parts) == 3:
+            # results/task/variant/run
+            res_task = parts[0]
+            res_variant = parts[1]
+            res_round = parts[2]
+        elif len(parts) == 2:
+            # results/task/variant (direct files)
+            res_task = parts[0]
+            res_variant = parts[1]
+
+        # Filter by round if requested
+        if round_num and res_round != str(round_num):
             continue
+            
+        parsed_results.append({
+            "path": r,
+            "exp": res_exp,
+            "task": res_task,
+            "variant": res_variant,
+            "round": res_round
+        })
 
-        # Check for sub-variants (qwen/gemini)
-        variants = [d for d in glob.glob(os.path.join(task_path, "*")) if os.path.isdir(d)]
-        variants.sort()
+    # Sort and group
+    parsed_results.sort(key=lambda x: (x["exp"], x["task"], x["variant"], x["round"]))
+
+    print(f"Report for Experiment: {exp_name if exp_name else 'All'} | Round: {round_num if round_num else 'All'}")
+    print(f"{'Exp':<12} | {'Task Name (Variant)':<37} | {'Rnd':<4} | {'Gen':<4} | {'Best Score':<12} | {'Const':<17} | {'Time':<8} | {'API':<18} | {'Status'}")
+    print("-" * 171)
+
+    for res in parsed_results:
+        display_name = f"{res['task']} ({res['variant']})"
         
-        has_named_variants = False
-        for var_path in variants:
-            var_name = os.path.basename(var_path)
-            if var_name in ["qwen", "gemini"]:
-                has_named_variants = True
-                latest_run = get_latest_run_dir(var_path)
-                if latest_run:
-                    process_and_print_run(latest_run, f"{task_name} ({var_name})")
-                else:
-                    print(f"{task_name + ' (' + var_name + ')':<37} | {'N/A':<10} | {'-':<4} | {'-':<12} | {'-':<17} | {'-':<8} | {'-':<18} | No runs")
-
-        if not has_named_variants:
-            # Fallback for old structure or non-variant tasks
-            latest_run = get_latest_run_dir(task_path)
-            if latest_run:
-                process_and_print_run(latest_run, task_name)
+        db_path = os.path.join(res["path"], "evolution_db.sqlite")
+        if not os.path.exists(db_path):
+            db_path = os.path.join(res["path"], "evolution.db")
+        
+        duration, api_status = parse_log_stats(res["path"])
+        
+        try:
+            df = load_programs_to_df(db_path)
+            if df is None or df.empty:
+                print(f"{res['exp']:<12} | {display_name:<37} | {res['round']:<4} | {'0':<4} | {'-':<12} | {'-':<17} | {duration:<8} | {api_status:<18} | Empty")
+                continue
+            
+            if 'correct' in df.columns:
+                correct_df = df[df['correct'] == True]
             else:
-                print(f"{task_name:<37} | {'N/A':<10} | {'-':<4} | {'-':<12} | {'-':<17} | {'-':<8} | {'-':<18} | No runs")
+                correct_df = df
+
+            total_gens = (df['generation'].max() + 1) if 'generation' in df.columns else 0
+            
+            if correct_df.empty:
+                print(f"{res['exp']:<12} | {display_name:<37} | {res['round']:<4} | {total_gens:<4} | {'-':<12} | {'-':<17} | {duration:<8} | {api_status:<18} | No valid")
+                continue
+
+            best_idx = correct_df['combined_score'].idxmax()
+            best_row = correct_df.loc[best_idx]
+            best_score = best_row['combined_score']
+            
+            derived_val_str = "-"
+            if "first_autocorr" in res['task']:
+                val = 1.0 / best_score if abs(best_score) > 1e-9 else 0
+                derived_val_str = f"c1={val:.6f} ↓"
+            elif "second_autocorr" in res['task']:
+                derived_val_str = f"c2={best_score:.6f} ↑"
+            elif "third_autocorr" in res['task']:
+                val = 1.0 / best_score if abs(best_score) > 1e-9 else 0
+                derived_val_str = f"c3={val:.6f} ↓"
+            elif "hexagon_packing" in res['task']:
+                val = 1.0 / best_score if abs(best_score) > 1e-9 else 0
+                derived_val_str = f"s={val:.6f} ↓"
+            elif "minimizing_max_min_dist" in res['task']:
+                val = 1.0 / best_score if abs(best_score) > 1e-9 else 0
+                derived_val_str = f"r={val:.6f} ↓"
+            elif "circle_packing" in res['task']:
+                derived_val_str = f"sum={best_score:.6f} ↑"
+            
+            print(f"{res['exp']:<12} | {display_name:<37} | {res['round']:<4} | {total_gens:<4} | {best_score:<12.6f} | {derived_val_str:<17} | {duration:<8} | {api_status:<18} | OK")
+
+        except Exception as e:
+            print(f"{res['exp']:<12} | {display_name:<37} | {res['round']:<4} | {'-':<4} | {'Error':<12} | {'-':<17} | {duration:<8} | {api_status:<18} | Error")
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: manage_benchmark_status.py [check|mark|report] [task_name]")
+        print("Usage: manage_benchmark_status.py [check|mark|report] [task_name/exp_name] [round]")
         print("  check  : Check if task is completed (exit 0=yes, 1=no)")
         print("  mark   : Mark task as completed")
         print("  report : Show summary of all results")
@@ -259,7 +350,9 @@ if __name__ == "__main__":
     command = sys.argv[1]
     
     if command == "report":
-        generate_report()
+        exp = sys.argv[2] if len(sys.argv) > 2 else None
+        rnd = sys.argv[3] if len(sys.argv) > 3 else None
+        generate_report(exp, rnd)
         sys.exit(0)
     
     if len(sys.argv) < 3:
