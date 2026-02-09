@@ -81,6 +81,12 @@ run_experiment() {
         # If no slots found, wait for any background job to finish
         if [ $assigned_start_slot -eq -1 ]; then
             wait -n
+            if [ $? -eq 127 ]; then
+                echo "Warning: No background jobs running but slots appear busy. Clearing slot state to prevent deadlock."
+                for ((k=0; k<NUM_SLOTS; k++)); do
+                    SLOT_PIDS[$k]=0
+                done
+            fi
         fi
     done
 
