@@ -37,8 +37,6 @@ for ((i=0; i<NUM_SLOTS; i++)); do
     SLOT_PIDS[$i]=0
 done
 
-echo "Starting benchmark pipeline for experiment '$EXP_NAME' round '$ROUND' with NUM_SLOTS=$NUM_SLOTS (Cores per slot: $SLOT_SIZE)..."
-
 get_required_slots() {
     if [[ "$1" == "minimizing_max_min_dist_14_3" ]]; then
         echo 2 # Needs 20 cores
@@ -47,26 +45,34 @@ get_required_slots() {
     fi
 }
 
-run_experiment() {
-    local task=$1
-    local variant=$2 # "qwen" or "gemini"
-    local evolution_config=$3
+# Build the task queue
+PENDING_TASKS=()
+for variant in "qwen" "gemini"; do
+    for task in "${TASKS[@]}"; do
+        PENDING_TASKS+=("$task|$variant|${task}_${variant}")
+    done
+done
+
+echo "Starting benchmark pipeline for experiment '$EXP_NAME' round '$ROUND' with NUM_SLOTS=$NUM_SLOTS (Cores per slot: $SLOT_SIZE)..."
+echo "Total experiments to run: ${#PENDING_TASKS[@]}"
+
+while [ ${#PENDING_TASKS[@]} -gt 0 ] || [ $(jobs -r | wc -l) -gt 0 ]; do
+    launched_any=false
     
-    local required_slots=$(get_required_slots "$task")
-    
-    # Find consecutive free slots
-    local assigned_start_slot=-1
-    while [ $assigned_start_slot -eq -1 ]; do
-        # Iterate through possible start slots
+    # Try to launch tasks from the queue
+    NEW_PENDING_TASKS=()
+    for item in "${PENDING_TASKS[@]}"; do
+        IFS='|' read -r task variant evolution_config <<< "$item"
+        required_slots=$(get_required_slots "$task")
+        
+        # Find consecutive free slots
+        assigned_start_slot=-1
         for ((i=0; i<=NUM_SLOTS-required_slots; i++)); do
-            local all_free=true
-            # Check if all needed slots from i are free
+            all_free=true
             for ((j=0; j<required_slots; j++)); do
-                local slot_idx=$((i + j))
-                local pid=${SLOT_PIDS[$slot_idx]}
-                # Check if PID is set and process is running
-                if [ "$pid" -ne 0 ] && kill -0 "$pid" 2>/dev/null;
- then
+                slot_idx=$((i + j))
+                pid=${SLOT_PIDS[$slot_idx]}
+                if [ "$pid" -ne 0 ] && kill -0 "$pid" 2>/dev/null; then
                     all_free=false
                     break
                 fi
@@ -78,59 +84,44 @@ run_experiment() {
             fi
         done
 
-        # If no slots found, wait for any background job to finish
-        if [ $assigned_start_slot -eq -1 ]; then
-            wait -n
-            if [ $? -eq 127 ]; then
-                echo "Warning: No background jobs running but slots appear busy. Clearing slot state to prevent deadlock."
-                for ((k=0; k<NUM_SLOTS; k++)); do
-                    SLOT_PIDS[$k]=0
-                done
-            fi
+        if [ $assigned_start_slot -ne -1 ]; then
+            # Calculate core range
+            start_core=$((assigned_start_slot * SLOT_SIZE))
+            end_core=$((start_core + (required_slots * SLOT_SIZE) - 1))
+            core_range="${start_core}-${end_core}"
+
+            echo "Launching task: $task ($variant) on cores $core_range (Slots $assigned_start_slot to $((assigned_start_slot + required_slots - 1)))"
+
+            OUTPUT_DIR="results/${EXP_NAME}/${variant}/${ROUND}/${task}"
+            mkdir -p "$OUTPUT_DIR"
+            LOG_FILE="$OUTPUT_DIR/run.log"
+
+            taskset -c "$core_range" python shinka/launch_hydra.py \
+                task@_global_=$task \
+                evolution@_global_=$evolution_config \
+                database@_global_=$task \
+                output_dir=$OUTPUT_DIR \
+                variant_suffix="_${variant}" > "$LOG_FILE" 2>&1 &
+
+            job_pid=$!
+            for ((j=0; j<required_slots; j++)); do
+                SLOT_PIDS[$((assigned_start_slot + j))]=$job_pid
+            done
+            launched_any=true
+        else
+            # Keep in queue
+            NEW_PENDING_TASKS+=("$item")
         fi
     done
+    PENDING_TASKS=("${NEW_PENDING_TASKS[@]}")
 
-    # Calculate core range
-    local start_core=$((assigned_start_slot * SLOT_SIZE))
-    local end_core=$((start_core + (required_slots * SLOT_SIZE) - 1))
-    local core_range="${start_core}-${end_core}"
-
-    echo "Launching task: $task ($variant) on cores $core_range (Slots $assigned_start_slot to $((assigned_start_slot + required_slots - 1)))"
-
-    local OUTPUT_DIR="results/${EXP_NAME}/${variant}/${ROUND}/${task}"
-    # Ensure directory exists for the log file
-    mkdir -p "$OUTPUT_DIR"
-    local LOG_FILE="$OUTPUT_DIR/run.log"
-
-    # Launch with taskset
-    # Note: Hydra/Slurm config 'cpus' parameter is passed implicitly via config file, 
-    # but taskset ensures affinity.
-    taskset -c "$core_range" python shinka/launch_hydra.py \
-        task@_global_=$task \
-        evolution@_global_=$evolution_config \
-        database@_global_=$task \
-        output_dir=$OUTPUT_DIR \
-        variant_suffix="_${variant}" > "$LOG_FILE" 2>&1 &
-
-    local job_pid=$!
-    
-    # Mark all assigned slots with the new PID
-    for ((j=0; j<required_slots; j++)); do
-        local slot_idx=$((assigned_start_slot + j))
-        SLOT_PIDS[$slot_idx]=$job_pid
-    done
-}
-
-echo "=== Launching all experiments (Qwen and Gemini) ==="
-for variant in "qwen" "gemini"; do
-    echo "--- Queueing $variant experiments ---"
-    for task in "${TASKS[@]}"; do
-        run_experiment "$task" "$variant" "${task}_${variant}"
-    done
+    if [ "$launched_any" = false ] && [ ${#PENDING_TASKS[@]} -gt 0 ]; then
+        # Wait for any background job to finish before trying again
+        wait -n
+    elif [ ${#PENDING_TASKS[@]} -eq 0 ] && [ $(jobs -r | wc -l) -gt 0 ]; then
+        # No more tasks to launch, just wait for the rest
+        wait
+    fi
 done
-
-# Wait for all background jobs to finish
-echo "All experiments queued. Waiting for completion..."
-wait
 
 echo "All benchmark experiments finished."
