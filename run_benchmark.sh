@@ -45,11 +45,18 @@ for ((i=0; i<NUM_SLOTS; i++)); do
 done
 
 get_required_slots() {
-    if [[ "$1" == "minimizing_max_min_dist_14_3" ]]; then
-        echo 2 # Needs 20 cores
-    else
-        echo 1 # Needs 10 cores
+    local task=$1
+    local config_file="configs/task/${task}.yaml"
+    local cpus=10 # Default fallback
+    if [ -f "$config_file" ]; then
+        # Extract cpus from the yaml file (e.g., 'cpus: 10')
+        local extracted_cpus=$(grep "cpus:" "$config_file" | head -n 1 | awk '{print $2}')
+        if [ -n "$extracted_cpus" ]; then
+            cpus=$extracted_cpus
+        fi
     fi
+    # Calculate how many 10-core slots are needed
+    echo $(( (cpus + SLOT_SIZE - 1) / SLOT_SIZE ))
 }
 
 # Build the task queue: All rounds for Qwen first, then all rounds for Gemini
@@ -113,38 +120,6 @@ while [ ${#PENDING_TASKS[@]} -gt 0 ] || [ $(jobs -r | wc -l) -gt 0 ]; do
                 evolution@_global_=$evolution_config \
                 database@_global_=$task \
                 +evo_config.seed=$SEED \
-                output_dir=$OUTPUT_DIR \
-                variant_suffix="_${variant}" > "$LOG_FILE" 2>&1 &
-
-            job_pid=$!
-            for ((j=0; j<required_slots; j++)); do
-                SLOT_PIDS[$((assigned_start_slot + j))]=$job_pid
-            done
-            launched_any=true
-        else
-            # Keep in queue
-            NEW_PENDING_TASKS+=("$item")
-        fi
-    done
-    PENDING_TASKS=("${NEW_PENDING_TASKS[@]}")
-
-    if [ "$launched_any" = false ] && [ ${#PENDING_TASKS[@]} -gt 0 ]; then
-        # Wait for any background job to finish before trying again
-        wait -n
-    elif [ ${#PENDING_TASKS[@]} -eq 0 ] && [ $(jobs -r | wc -l) -gt 0 ]; then
-        # No more tasks to launch, just wait for the rest
-        wait
-    fi
-done
-
-            OUTPUT_DIR="results/${EXP_NAME}/${variant}/${ROUND}/${task}"
-            mkdir -p "$OUTPUT_DIR"
-            LOG_FILE="$OUTPUT_DIR/run.log"
-
-            taskset -c "$core_range" python shinka/launch_hydra.py \
-                task@_global_=$task \
-                evolution@_global_=$evolution_config \
-                database@_global_=$task \
                 output_dir=$OUTPUT_DIR \
                 variant_suffix="_${variant}" > "$LOG_FILE" 2>&1 &
 
