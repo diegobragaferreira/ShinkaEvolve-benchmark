@@ -24,7 +24,14 @@ TASKS=(
 )
 
 EXP_NAME=${1:-"default_exp"}
-ROUND=${2:-"1"}
+NUM_ROUNDS_ARG=${2:-"1"}
+
+# Parse NUM_ROUNDS from "num_rounds=3" or just "3"
+if [[ "$NUM_ROUNDS_ARG" == num_rounds=* ]]; then
+    NUM_ROUNDS=${NUM_ROUNDS_ARG#num_rounds=}
+else
+    NUM_ROUNDS=$NUM_ROUNDS_ARG
+fi
 
 # Configuration for CPU affinity
 TOTAL_CORES=48
@@ -45,16 +52,18 @@ get_required_slots() {
     fi
 }
 
-# Build the task queue
+# Build the task queue: All rounds for Qwen first, then all rounds for Gemini
 PENDING_TASKS=()
 for variant in "qwen" "gemini"; do
-    for task in "${TASKS[@]}"; do
-        PENDING_TASKS+=("$task|$variant|${task}_${variant}")
+    for ((round=1; round<=NUM_ROUNDS; round++)); do
+        for task in "${TASKS[@]}"; do
+            PENDING_TASKS+=("$task|$variant|${task}_${variant}|$round")
+        done
     done
 done
 
-echo "Starting benchmark pipeline for experiment '$EXP_NAME' round '$ROUND' with NUM_SLOTS=$NUM_SLOTS (Cores per slot: $SLOT_SIZE)..."
-echo "Total experiments to run: ${#PENDING_TASKS[@]}"
+echo "Starting benchmark pipeline for experiment '$EXP_NAME' with NUM_ROUNDS=$NUM_ROUNDS..."
+echo "Total experiments to run: ${#PENDING_TASKS[@]} (Slots available: $NUM_SLOTS, Cores per slot: $SLOT_SIZE)"
 
 while [ ${#PENDING_TASKS[@]} -gt 0 ] || [ $(jobs -r | wc -l) -gt 0 ]; do
     launched_any=false
@@ -62,7 +71,7 @@ while [ ${#PENDING_TASKS[@]} -gt 0 ] || [ $(jobs -r | wc -l) -gt 0 ]; do
     # Try to launch tasks from the queue
     NEW_PENDING_TASKS=()
     for item in "${PENDING_TASKS[@]}"; do
-        IFS='|' read -r task variant evolution_config <<< "$item"
+        IFS='|' read -r task variant evolution_config round <<< "$item"
         required_slots=$(get_required_slots "$task")
         
         # Find consecutive free slots
@@ -90,7 +99,43 @@ while [ ${#PENDING_TASKS[@]} -gt 0 ] || [ $(jobs -r | wc -l) -gt 0 ]; do
             end_core=$((start_core + (required_slots * SLOT_SIZE) - 1))
             core_range="${start_core}-${end_core}"
 
-            echo "Launching task: $task ($variant) on cores $core_range (Slots $assigned_start_slot to $((assigned_start_slot + required_slots - 1)))"
+            echo "Launching: Task $task | Variant $variant | Round $round on cores $core_range (Slots $assigned_start_slot to $((assigned_start_slot + required_slots - 1)))"
+
+            OUTPUT_DIR="results/${EXP_NAME}/${variant}/${round}/${task}"
+            mkdir -p "$OUTPUT_DIR"
+            LOG_FILE="$OUTPUT_DIR/launch_hydra.log"
+            
+            # Calculate a unique seed for this round for reproducibility
+            SEED=$((42 + round))
+
+            taskset -c "$core_range" python shinka/launch_hydra.py \
+                task@_global_=$task \
+                evolution@_global_=$evolution_config \
+                database@_global_=$task \
+                +evo_config.seed=$SEED \
+                output_dir=$OUTPUT_DIR \
+                variant_suffix="_${variant}" > "$LOG_FILE" 2>&1 &
+
+            job_pid=$!
+            for ((j=0; j<required_slots; j++)); do
+                SLOT_PIDS[$((assigned_start_slot + j))]=$job_pid
+            done
+            launched_any=true
+        else
+            # Keep in queue
+            NEW_PENDING_TASKS+=("$item")
+        fi
+    done
+    PENDING_TASKS=("${NEW_PENDING_TASKS[@]}")
+
+    if [ "$launched_any" = false ] && [ ${#PENDING_TASKS[@]} -gt 0 ]; then
+        # Wait for any background job to finish before trying again
+        wait -n
+    elif [ ${#PENDING_TASKS[@]} -eq 0 ] && [ $(jobs -r | wc -l) -gt 0 ]; then
+        # No more tasks to launch, just wait for the rest
+        wait
+    fi
+done
 
             OUTPUT_DIR="results/${EXP_NAME}/${variant}/${ROUND}/${task}"
             mkdir -p "$OUTPUT_DIR"

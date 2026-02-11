@@ -62,6 +62,7 @@ class EvolutionConfig:
     novelty_llm_models: Optional[List[str]] = None
     novelty_llm_kwargs: dict = field(default_factory=lambda: {})
     use_text_feedback: bool = False
+    seed: Optional[int] = None
 
 
 @dataclass
@@ -99,6 +100,15 @@ class EvolutionRunner:
         self.job_config = job_config
         self.db_config = db_config
         self.verbose = verbose
+
+        # Set global seeds if provided
+        if evo_config.seed is not None:
+            import random
+            import numpy as np
+
+            random.seed(evo_config.seed)
+            np.random.seed(evo_config.seed)
+            logger.info(f"Set global random seed to: {evo_config.seed}")
 
         print_gradient_logo((255, 0, 0), (255, 255, 255))
         if evo_config.results_dir is None:
@@ -151,6 +161,7 @@ class EvolutionRunner:
         ):
             self.llm_selection = AsymmetricUCB(
                 arm_names=evo_config.llm_models,
+                seed=evo_config.seed,
                 **evo_config.llm_dynamic_selection_kwargs,
             )
         else:
